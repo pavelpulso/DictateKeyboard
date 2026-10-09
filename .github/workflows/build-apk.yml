@@ -10,6 +10,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -22,15 +25,14 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - uses: android-actions/setup-android@v3
-
       - name: Install NDK, CMake, build-tools
         run: |
+          SDKM=$(ls -d $ANDROID_HOME/cmdline-tools/*/bin/sdkmanager | sort -V | tail -1)
           NDK=$(grep '^ndk' gradle/tools.versions.toml | cut -d'"' -f2)
           CMAKE=$(grep '^cmake' gradle/tools.versions.toml | cut -d'"' -f2)
           BT=$(grep '^buildTools' gradle/tools.versions.toml | cut -d'"' -f2)
-          yes | sdkmanager --licenses > /dev/null
-          sdkmanager "ndk;$NDK" "build-tools;$BT" "cmake;$CMAKE" || sdkmanager "ndk;$NDK" "build-tools;$BT"
+          yes | $SDKM --licenses > /dev/null || true
+          $SDKM "ndk;$NDK" "build-tools;$BT" "cmake;$CMAKE" || $SDKM "ndk;$NDK" "build-tools;$BT"
 
       - name: Rust toolchain
         run: |
