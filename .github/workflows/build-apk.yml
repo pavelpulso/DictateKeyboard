@@ -44,6 +44,9 @@ jobs:
       - name: Fetch sherpa-onnx native libs
         run: bash tools/fetch-sherpa-onnx.sh
 
+      - name: Build bergamot native lib
+        run: bash tools/bergamot/build-android.sh arm64-v8a
+
       - uses: gradle/actions/setup-gradle@v4
 
       - name: Build
