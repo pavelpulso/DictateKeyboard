@@ -1,22 +1,53 @@
 name: Build APK
 
 on:
+  schedule:
+    - cron: "0 5 * * *"
   workflow_dispatch:
     inputs:
-      variant:
-        description: Gradle build type
-        default: Benchmark
+      force:
+        description: Rebuild even if the latest upstream release is already published
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
 
 jobs:
-  build:
+  check:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tags.outputs.tag }}
+      build: ${{ steps.tags.outputs.build }}
+    steps:
+      - id: tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=$(gh api repos/DevEmperor/DictateKeyboard/releases --jq '[.[] | select(.draft == false and .prerelease == false and (.tag_name | test("^v[0-9]")))][0].tag_name')
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1 && [ "${{ inputs.force }}" != "true" ]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "$TAG already published"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "building $TAG"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-    timeout-minutes: 90
+      TAG: ${{ needs.check.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
+          repository: DevEmperor/DictateKeyboard
+          ref: ${{ needs.check.outputs.tag }}
           submodules: recursive
           fetch-depth: 0
 
@@ -32,7 +63,7 @@ jobs:
           CMAKE=$(grep '^cmake' gradle/tools.versions.toml | cut -d'"' -f2)
           BT=$(grep '^buildTools' gradle/tools.versions.toml | cut -d'"' -f2)
           yes | $SDKM --licenses > /dev/null || true
-          $SDKM "ndk;$NDK" "build-tools;$BT" "cmake;$CMAKE" || $SDKM "ndk;$NDK" "build-tools;$BT"
+          $SDKM "ndk;$NDK" "build-tools;$BT" "cmake;$CMAKE"
 
       - name: Rust toolchain
         run: |
@@ -41,19 +72,37 @@ jobs:
           rustup default "$RT"
           rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 
-      - name: Fetch sherpa-onnx native libs
-        run: bash tools/fetch-sherpa-onnx.sh
+      - name: Native libs
+        run: |
+          bash tools/fetch-sherpa-onnx.sh
+          bash tools/bergamot/build-android.sh arm64-v8a
 
-      - name: Build bergamot native lib
-        run: bash tools/bergamot/build-android.sh arm64-v8a
+      - name: arm64 only, signing config
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          sed -i 's/abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")/abiFilters += listOf("arm64-v8a")/' app/build.gradle.kts
+          grep -q 'listOf("arm64-v8a")' app/build.gradle.kts
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/dictate.p12"
+          {
+            echo "storeFile=$RUNNER_TEMP/dictate.p12"
+            echo "storePassword=$KEYSTORE_PASSWORD"
+            echo "keyAlias=dictate"
+            echo "keyPassword=$KEYSTORE_PASSWORD"
+          } > keystore.properties
 
       - uses: gradle/actions/setup-gradle@v4
 
       - name: Build
-        run: ./gradlew :app:assemble${{ inputs.variant }} --no-daemon --stacktrace
+        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dictate-apk
-          path: app/build/outputs/apk/**/*.apk
-          retention-days: 7
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          APK=$(find app/build/outputs/apk/release -name '*.apk' | head -1)
+          cp "$APK" "Dictate-$TAG-arm64.apk"
+          gh release create "$TAG" "Dictate-$TAG-arm64.apk" -R "$GITHUB_REPOSITORY" \
+            --title "Dictate $TAG (arm64, personal build)" \
+            --notes "Built from DevEmperor/DictateKeyboard@$TAG. Upstream notes: https://github.com/DevEmperor/DictateKeyboard/releases/tag/$TAG"
